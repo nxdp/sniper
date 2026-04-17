@@ -67,6 +67,7 @@ sniper -f domains.txt -output results.txt
 - `-workers int` number of concurrent workers, default `200`
 - `-verbose` print blocked domains too
 - `-retries int` retries per IP on failure, default `0`
+- `-q` hide start and completion logs
 
 ## Notes
 
@@ -74,4 +75,4 @@ sniper -f domains.txt -output results.txt
 - A domain is `allowed` if any resolved IP completes the TLS handshake.
 - `-timeout` is per attempt, not a total cap for the whole domain.
 - Result lines go to stdout, or to the file passed with `-output`.
-- Progress and summary lines are written to stderr.
+- Start, completion, and error logs are written to stderr.

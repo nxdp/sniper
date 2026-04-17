@@ -21,6 +21,7 @@ type Config struct {
 	Output  string
 	Verbose bool
 	Retries int
+	Quiet   bool
 }
 
 type Result struct {
@@ -35,6 +36,52 @@ var (
 	allowed atomic.Int64
 	failed  atomic.Int64
 )
+
+func logf(colorize bool, level string, format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "%s %s\n", formatLogLevel(level, colorize), fmt.Sprintf(format, args...))
+}
+
+func formatLogLevel(level string, colorize bool) string {
+	tag := "[" + level + "]"
+	if !colorize {
+		return tag
+	}
+
+	switch level {
+	case "INFO":
+		return "\033[32m" + tag + "\033[0m"
+	case "WARN":
+		return "\033[33m" + tag + "\033[0m"
+	case "ERR":
+		return "\033[31m" + tag + "\033[0m"
+	default:
+		return tag
+	}
+}
+
+func formatLatency(latencyMs int64, colorize bool) string {
+	latency := fmt.Sprintf("%dms", latencyMs)
+	if !colorize {
+		return latency
+	}
+
+	switch {
+	case latencyMs <= 2000:
+		return "\033[32m" + latency + "\033[0m"
+	case latencyMs <= 6000:
+		return "\033[33m" + latency + "\033[0m"
+	default:
+		return "\033[31m" + latency + "\033[0m"
+	}
+}
+
+func fileIsTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
 
 func resolveIPs(ctx context.Context, domain string, timeout time.Duration) ([]string, error) {
 	resolver := &net.Resolver{}
@@ -116,6 +163,7 @@ func probe(ctx context.Context, domain string, port int, timeout time.Duration, 
 
 func main() {
 	cfg := Config{}
+	logColorize := fileIsTerminal(os.Stderr)
 	flag.StringVar(&cfg.File, "f", "", "Input file with domains (one per line)")
 	flag.IntVar(&cfg.Port, "port", 443, "TLS port to probe")
 	flag.IntVar(&cfg.Workers, "workers", 200, "Concurrent workers")
@@ -123,32 +171,36 @@ func main() {
 	flag.StringVar(&cfg.Output, "output", "", "Save results to file (default: stdout)")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Also print blocked domains")
 	flag.IntVar(&cfg.Retries, "retries", 0, "Retries on failure")
+	flag.BoolVar(&cfg.Quiet, "q", false, "Quiet mode (hide start/end scan logs)")
 	flag.Parse()
 
 	if cfg.File == "" {
-		fmt.Fprintln(os.Stderr, "usage: sniper -f domains.txt [options]")
+		logf(logColorize, "ERR", "usage: sniper -f domains.txt [options]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
 	inFile, err := os.Open(cfg.File)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot open %s: %v\n", cfg.File, err)
+		logf(logColorize, "ERR", "cannot open %s: %v", cfg.File, err)
 		os.Exit(1)
 	}
 	defer inFile.Close()
 
 	outWriter := bufio.NewWriter(os.Stdout)
+	outputFile := os.Stdout
 	var outFile *os.File
 	if cfg.Output != "" {
 		f, err := os.Create(cfg.Output)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			logf(logColorize, "ERR", "%v", err)
 			os.Exit(1)
 		}
 		outFile = f
+		outputFile = f
 		outWriter = bufio.NewWriter(f)
 	}
+	outputColorize := fileIsTerminal(outputFile)
 
 	cleanupOutput := func() {
 		outWriter.Flush()
@@ -190,7 +242,9 @@ func main() {
 		lines <- fmt.Sprintf(format, args...)
 	}
 
-	fmt.Fprintf(os.Stderr, "scanning workers=%d  timeout=%s\n", cfg.Workers, cfg.Timeout)
+	if !cfg.Quiet {
+		logf(logColorize, "INFO", "starting workers=%d timeout=%s", cfg.Workers, cfg.Timeout)
+	}
 
 	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
@@ -201,11 +255,11 @@ func main() {
 
 				if r.Allowed {
 					allowed.Add(1)
-					writeLine("%-30s %-18s %dms allowed", r.Domain, r.IP, r.Latency.Milliseconds())
+					writeLine("%-30s %-18s %s allowed", r.Domain, r.IP, formatLatency(r.Latency.Milliseconds(), outputColorize))
 				} else {
 					failed.Add(1)
 					if cfg.Verbose {
-						writeLine("%-30s %-18s %dms blocked", r.Domain, r.IP, r.Latency.Milliseconds())
+						writeLine("%-30s %-18s %s blocked", r.Domain, r.IP, formatLatency(r.Latency.Milliseconds(), outputColorize))
 					}
 				}
 			}
@@ -228,10 +282,16 @@ func main() {
 
 	if scanErr != nil {
 		cleanupOutput()
-		fmt.Fprintf(os.Stderr, "error: cannot read %s: %v\n", cfg.File, scanErr)
+		logf(logColorize, "ERR", "cannot read %s: %v", cfg.File, scanErr)
 		os.Exit(1)
 	}
 
-	fmt.Fprintf(os.Stderr, "done  allowed=%d  blocked=%d  total=%d\n", allowed.Load(), failed.Load(), total)
+	if !cfg.Quiet {
+		level := "INFO"
+		if allowed.Load() == 0 {
+			level = "WARN"
+		}
+		logf(logColorize, level, "completed allowed=%d blocked=%d total=%d", allowed.Load(), failed.Load(), total)
+	}
 	cleanupOutput()
 }
