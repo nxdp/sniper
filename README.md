@@ -1,93 +1,156 @@
 # Sniper
 
-Check whether a domain can complete a TLS handshake from your current network using its real SNI.
+`sniper` checks whether a domain can complete a TLS handshake from your network.
 
-`sniper` resolves the domain, tries every returned IP, and marks it `allowed` as soon as one IP completes the handshake.
+You give it a domain like `google.com`, and it tries a real TCP connection plus TLS handshake for that domain.
+
+It tells you if the domain looks `allowed` or `blocked`.
+
+This is useful when your network is restricted and you want a quick answer like:
+
+- does this domain complete TLS from here?
+- which domains still work?
+- does this domain work on this specific IP?
+
+## Download
+
+Download the binary for your system from GitHub Releases:
+
+[GitHub Releases](https://github.com/nxdp/sniper/releases)
+
+Pick the file for your platform:
+
+- Linux
+- Windows
+- macOS
+
+Extract the archive, then run `sniper`.
 
 ## Quick Start
 
-Build:
+Check one domain:
 
 ```bash
-go build -o sniper .
+sniper google.com
 ```
 
-Create an input file with one domain per line:
+Check many domains from a file:
+
+```bash
+sniper -f domains.txt
+```
+
+Example `domains.txt`:
 
 ```text
-hcaptcha.com
 google.com
+hcaptcha.com
 letsencrypt.org
 ```
 
-Run:
+Show blocked domains too:
 
 ```bash
-sniper -f domains.txt
+sniper -f domains.txt -verbose
 ```
 
-See full help:
+## What The Result Means
+
+Example:
+
+```text
+google.com                     142.250.185.46     210ms allowed
+```
+
+This means:
+
+- `google.com` is the domain you tested
+- `142.250.185.46` is the IP that worked
+- `210ms` is how long it took
+- `allowed` means the TCP connection and TLS handshake worked
+
+If it says `blocked`, the TCP connection or TLS handshake did not work.
+
+## Common Examples
+
+Check one domain with a shorter timeout:
 
 ```bash
-sniper -h
+sniper google.com -timeout 1s
 ```
 
-## Important Examples
-
-Scan a file:
-
-```bash
-sniper -f domains.txt
-```
-
-Probe a different TLS port:
-
-```bash
-sniper -f domains.txt -port 8443
-```
-
-Use a shorter timeout:
-
-```bash
-sniper -f domains.txt -timeout 1s
-```
-
-Write results to a file:
+Save results to a file:
 
 ```bash
 sniper -f domains.txt -output results.txt
 ```
 
-Scan domains against one fixed IP:
+Check a domain on one specific IP:
 
 ```bash
-sniper -f domains.txt -target 104.19.229.21
+sniper google.com -target 1.1.1.1
 ```
 
-Scan domains against IPs loaded from a file:
+Check a list of domains on one specific IP:
+
+```bash
+sniper -f domains.txt -target 1.1.1.1
+```
+
+Check a list of domains on many IPs from a file:
 
 ```bash
 sniper -f domains.txt -target-file ips.txt
 ```
 
-## Flags
+Use a different HTTPS port:
 
-- `-f string` input file with domains, one per line
-- `-port int` TLS port to probe, default `443`
-- `-timeout duration` per DNS lookup, TCP dial, and TLS handshake timeout, default `2s`
-- `-output string` write result lines to a file
-- `-workers int` number of concurrent workers, default `200`
-- `-verbose` print blocked domains too
-- `-retries int` retries per IP on failure, default `0`
-- `-q` hide start and completion logs
-- `-target string` override DNS and probe one IP for every domain
-- `-target-file string` override DNS and probe IPs from a file for every domain
+```bash
+sniper google.com -port 8443
+```
+
+## Main Flags
+
+- `sniper google.com`
+  Check one domain directly
+
+- `-f domains.txt`
+  Check many domains from a file
+
+- `-verbose`
+  Also print blocked domains
+
+- `-timeout 1s`
+  Change how long sniper waits before giving up
+
+- `-output results.txt`
+  Save result lines to a file
+
+- `-target 1.1.1.1`
+  Skip DNS and try that IP for every domain
+
+- `-target-file ips.txt`
+  Skip DNS and try IPs from a file
+
+- `-port 443`
+  Change the port
+
+- `-q`
+  Hide the start and end log lines
 
 ## Notes
 
-- If a domain resolves to multiple IPs, `sniper` tries all of them.
-- If `-target` or `-target-file` is set, `sniper` skips DNS and uses those IPs instead.
-- A domain is `allowed` if any resolved IP completes the TLS handshake.
-- `-timeout` is per attempt, not a total cap for the whole domain.
-- Result lines go to stdout, or to the file passed with `-output`.
-- Start, completion, and error logs are written to stderr.
+- You can use either `sniper google.com` or `sniper -f domains.txt`
+- Do not use both at the same time
+- If a domain has more than one IP, `sniper` tries all of them
+- `allowed` does not mean the whole website will work, it only means the TCP connection and TLS handshake worked
+- this tool does not send a full HTTP request after the handshake
+- result lines can be saved with `-output`
+
+## Need Full Help?
+
+Run:
+
+```bash
+sniper -h
+```
