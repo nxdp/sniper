@@ -87,12 +87,107 @@ func fileIsTerminal(file *os.File) bool {
 	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
+func printUsage(colorize bool) {
+	logf(colorize, "ERR", "usage: sniper -f domains.txt [options]")
+	logf(colorize, "ERR", "   or: sniper domain [options]")
+	flag.PrintDefaults()
+}
+
+func splitCLIArgs(args []string) ([]string, []string) {
+	valueFlags := map[string]struct{}{
+		"f":           {},
+		"port":        {},
+		"workers":     {},
+		"timeout":     {},
+		"output":      {},
+		"retries":     {},
+		"target":      {},
+		"target-file": {},
+	}
+	boolFlags := map[string]struct{}{
+		"verbose": {},
+		"q":       {},
+		"h":       {},
+		"help":    {},
+	}
+
+	var flagArgs []string
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			positional = append(positional, arg)
+			continue
+		}
+
+		flagArgs = append(flagArgs, arg)
+		if strings.Contains(arg, "=") {
+			continue
+		}
+
+		name := strings.TrimLeft(arg, "-")
+		if _, ok := boolFlags[name]; ok {
+			continue
+		}
+		if _, ok := valueFlags[name]; ok {
+			if i+1 < len(args) {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+			continue
+		}
+
+		// Preserve a following non-flag token for unknown flags so it does not get
+		// misclassified as positional input before flag parsing reports the error.
+		if i+1 < len(args) {
+			next := args[i+1]
+			if next == "-" || !strings.HasPrefix(next, "-") {
+				i++
+				flagArgs = append(flagArgs, next)
+			}
+		}
+	}
+
+	return flagArgs, positional
+}
+
 func normalizeIP(raw string) (string, error) {
 	ip := net.ParseIP(strings.TrimSpace(raw))
 	if ip == nil {
 		return "", fmt.Errorf("invalid IP %q", raw)
 	}
 	return ip.String(), nil
+}
+
+func enqueueDomains(jobs chan<- string, filePath, singleDomain string) (int64, error) {
+	if singleDomain != "" {
+		jobs <- singleDomain
+		return 1, nil
+	}
+
+	inFile, err := os.Open(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("cannot open %s: %w", filePath, err)
+	}
+	defer inFile.Close()
+
+	var total int64
+	scanner := bufio.NewScanner(inFile)
+	for scanner.Scan() {
+		if domain := strings.TrimSpace(scanner.Text()); domain != "" {
+			total++
+			jobs <- domain
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return total, fmt.Errorf("cannot read %s: %w", filePath, err)
+	}
+	return total, nil
 }
 
 func loadOverrideIPs(targetIP, targetFile string) ([]string, error) {
@@ -248,11 +343,26 @@ func main() {
 	flag.BoolVar(&cfg.Quiet, "q", false, "Quiet mode (hide start/end scan logs)")
 	flag.StringVar(&cfg.TargetIP, "target", "", "Override DNS and probe this IP for every domain")
 	flag.StringVar(&cfg.TargetFile, "target-file", "", "Override DNS and probe IPs from this file for every domain")
-	flag.Parse()
+	flagArgs, positionalDomains := splitCLIArgs(os.Args[1:])
+	flag.CommandLine.Parse(flagArgs)
 
-	if cfg.File == "" {
-		logf(logColorize, "ERR", "usage: sniper -f domains.txt [options]")
-		flag.PrintDefaults()
+	if len(positionalDomains) > 1 {
+		logf(logColorize, "ERR", "only one positional domain is supported")
+		os.Exit(1)
+	}
+
+	singleDomain := ""
+	if len(positionalDomains) == 1 {
+		singleDomain = strings.TrimSpace(positionalDomains[0])
+	}
+
+	if cfg.File != "" && singleDomain != "" {
+		logf(logColorize, "ERR", "cannot use both -f and a positional domain")
+		os.Exit(1)
+	}
+
+	if cfg.File == "" && singleDomain == "" {
+		printUsage(logColorize)
 		os.Exit(1)
 	}
 
@@ -261,13 +371,6 @@ func main() {
 		logf(logColorize, "ERR", "%v", err)
 		os.Exit(1)
 	}
-
-	inFile, err := os.Open(cfg.File)
-	if err != nil {
-		logf(logColorize, "ERR", "cannot open %s: %v", cfg.File, err)
-		os.Exit(1)
-	}
-	defer inFile.Close()
 
 	outWriter := bufio.NewWriter(os.Stdout)
 	outputFile := os.Stdout
@@ -348,15 +451,7 @@ func main() {
 		}()
 	}
 
-	var total int64
-	scanner := bufio.NewScanner(inFile)
-	for scanner.Scan() {
-		if d := scanner.Text(); d != "" {
-			total++
-			jobs <- d
-		}
-	}
-	scanErr := scanner.Err()
+	total, scanErr := enqueueDomains(jobs, cfg.File, singleDomain)
 	close(jobs)
 	wg.Wait()
 	close(lines)
@@ -364,7 +459,7 @@ func main() {
 
 	if scanErr != nil {
 		cleanupOutput()
-		logf(logColorize, "ERR", "cannot read %s: %v", cfg.File, scanErr)
+		logf(logColorize, "ERR", "%v", scanErr)
 		os.Exit(1)
 	}
 
