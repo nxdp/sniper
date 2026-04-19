@@ -132,6 +132,9 @@ sniper google.com -port 8443
 - `-target-file ips.txt`
   Skip DNS and try IPs from a file
 
+- `-ipv6`
+  Also include IPv6 in DNS lookup
+
 - `-port 443`
   Change the port
 
@@ -142,7 +145,9 @@ sniper google.com -port 8443
 
 - You can use either `sniper google.com` or `sniper -f domains.txt`
 - Do not use both at the same time
-- If a domain has more than one IP, `sniper` tries all of them
+- By default, DNS lookup uses IPv4 only
+- If you want IPv6 too, use `-ipv6`
+- If a domain has more than one matching IP, `sniper` tries all of them
 - `allowed` does not mean the whole website will work, it only means the TCP connection and TLS handshake worked
 - this tool does not send a full HTTP request after the handshake
 - result lines can be saved with `-output`

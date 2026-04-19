@@ -24,6 +24,7 @@ type Config struct {
 	Verbose    bool
 	Retries    int
 	Quiet      bool
+	IPv6       bool
 	TargetIP   string
 	TargetFile string
 }
@@ -106,6 +107,7 @@ func splitCLIArgs(args []string) ([]string, []string) {
 	}
 	boolFlags := map[string]struct{}{
 		"verbose": {},
+		"ipv6":    {},
 		"q":       {},
 		"h":       {},
 		"help":    {},
@@ -156,12 +158,12 @@ func splitCLIArgs(args []string) ([]string, []string) {
 	return flagArgs, positional
 }
 
-func normalizeIP(raw string) (string, error) {
+func normalizeIP(raw string) (net.IP, error) {
 	ip := net.ParseIP(strings.TrimSpace(raw))
 	if ip == nil {
-		return "", fmt.Errorf("invalid IP %q", raw)
+		return nil, fmt.Errorf("invalid IP %q", raw)
 	}
-	return ip.String(), nil
+	return ip, nil
 }
 
 func enqueueDomains(jobs chan<- string, filePath, singleDomain string) (int64, error) {
@@ -190,7 +192,7 @@ func enqueueDomains(jobs chan<- string, filePath, singleDomain string) (int64, e
 	return total, nil
 }
 
-func loadOverrideIPs(targetIP, targetFile string) ([]string, error) {
+func loadOverrideIPs(targetIP, targetFile string) ([]net.IP, error) {
 	if targetIP != "" && targetFile != "" {
 		return nil, fmt.Errorf("cannot use -target and -target-file together")
 	}
@@ -198,17 +200,18 @@ func loadOverrideIPs(targetIP, targetFile string) ([]string, error) {
 		return nil, nil
 	}
 
-	var ips []string
+	var ips []net.IP
 	seen := make(map[string]struct{})
 	addIP := func(raw string) error {
 		ip, err := normalizeIP(raw)
 		if err != nil {
 			return err
 		}
-		if _, ok := seen[ip]; ok {
+		ipStr := ip.String()
+		if _, ok := seen[ipStr]; ok {
 			return nil
 		}
-		seen[ip] = struct{}{}
+		seen[ipStr] = struct{}{}
 		ips = append(ips, ip)
 		return nil
 	}
@@ -245,30 +248,36 @@ func loadOverrideIPs(targetIP, targetFile string) ([]string, error) {
 	return ips, nil
 }
 
-func resolveIPs(ctx context.Context, domain string, timeout time.Duration) ([]string, error) {
+func resolveIPs(ctx context.Context, domain string, timeout time.Duration, includeIPv6 bool) ([]net.IP, error) {
 	resolver := &net.Resolver{}
 	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	addrs, err := resolver.LookupHost(lookupCtx, domain)
+	network := "ip4"
+	if includeIPv6 {
+		network = "ip"
+	}
+
+	addrs, err := resolver.LookupIP(lookupCtx, network, domain)
 	if err != nil {
 		return nil, fmt.Errorf("dns failed: %w", err)
 	}
+
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("dns failed: no addresses returned")
 	}
 	return addrs, nil
 }
 
-func candidateIPs(ctx context.Context, domain string, timeout time.Duration, overrideIPs []string) ([]string, error) {
+func candidateIPs(ctx context.Context, domain string, timeout time.Duration, includeIPv6 bool, overrideIPs []net.IP) ([]net.IP, error) {
 	if len(overrideIPs) > 0 {
 		return overrideIPs, nil
 	}
-	return resolveIPs(ctx, domain, timeout)
+	return resolveIPs(ctx, domain, timeout, includeIPv6)
 }
 
-func probe(ctx context.Context, domain string, port int, timeout time.Duration, retries int, overrideIPs []string) Result {
-	ips, err := candidateIPs(ctx, domain, timeout, overrideIPs)
+func probe(ctx context.Context, domain string, port int, timeout time.Duration, retries int, includeIPv6 bool, overrideIPs []net.IP) Result {
+	ips, err := candidateIPs(ctx, domain, timeout, includeIPv6, overrideIPs)
 	if err != nil {
 		return Result{Domain: domain, IP: "?", Allowed: false, Error: err.Error()}
 	}
@@ -276,8 +285,9 @@ func probe(ctx context.Context, domain string, port int, timeout time.Duration, 
 	var lastErr error
 	lastIP := "?"
 	for _, ip := range ips {
-		addr := net.JoinHostPort(ip, strconv.Itoa(port))
-		lastIP = ip
+		ipStr := ip.String()
+		addr := net.JoinHostPort(ipStr, strconv.Itoa(port))
+		lastIP = ipStr
 
 		for i := 0; i <= retries; i++ {
 			if ctx.Err() != nil {
@@ -313,7 +323,7 @@ func probe(ctx context.Context, domain string, port int, timeout time.Duration, 
 			tlsConn.Close()
 
 			if err == nil {
-				return Result{Domain: domain, IP: ip, Allowed: true, Latency: time.Since(start)}
+				return Result{Domain: domain, IP: ipStr, Allowed: true, Latency: time.Since(start)}
 			}
 
 			lastErr = err
@@ -340,6 +350,7 @@ func main() {
 	flag.StringVar(&cfg.Output, "output", "", "Save results to file (default: stdout)")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Also print blocked domains")
 	flag.IntVar(&cfg.Retries, "retries", 0, "Retries on failure")
+	flag.BoolVar(&cfg.IPv6, "ipv6", false, "Include IPv6 in DNS lookup")
 	flag.BoolVar(&cfg.Quiet, "q", false, "Quiet mode (hide start/end scan logs)")
 	flag.StringVar(&cfg.TargetIP, "target", "", "Override DNS and probe this IP for every domain")
 	flag.StringVar(&cfg.TargetFile, "target-file", "", "Override DNS and probe IPs from this file for every domain")
@@ -436,7 +447,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for domain := range jobs {
-				r := probe(ctx, domain, cfg.Port, cfg.Timeout, cfg.Retries, overrideIPs)
+				r := probe(ctx, domain, cfg.Port, cfg.Timeout, cfg.Retries, cfg.IPv6, overrideIPs)
 
 				if r.Allowed {
 					allowed.Add(1)
